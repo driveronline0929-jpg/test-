@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <title>⚡ AR Wire Maze Pro</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        #webcam { transform: scaleX(-1); will-change: transform; }
+    </style>
+</head>
+<body class="bg-black m-0 p-0 overflow-hidden select-none touch-none">
+
+    <video id="webcam" class="absolute w-full h-full object-cover z-10" autoplay playsinline muted></video>
+    <div id="canvas3d" class="absolute w-full h-full z-20 pointer-events-none"></div>
+
+    <div class="absolute top-4 left-4 z-30 bg-slate-900/90 backdrop-blur-md text-white p-5 rounded-xl border border-slate-700/50 shadow-2xl max-w-sm">
+        <h1 class="text-xl font-bold tracking-wide mb-1 text-cyan-400">⚡ AR Wire Maze Pro</h1>
+        <p class="text-xs text-slate-400 mb-3">ระบบประมวลผลอิสระบน GitHub Pages</p>
+        <div class="space-y-2 text-sm border-t border-slate-700 pt-3">
+            <div id="game-status" class="flex items-center gap-2">
+                <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>สถานะ: วงจรเปิด (ปกติ)</span>
+            </div>
+            <div id="score" class="text-slate-300 font-mono text-base">ชนสิ่งกีดขวาง: 0 ครั้ง</div>
+            <button id="btn-send" class="w-full mt-2 bg-cyan-600 hover:bg-cyan-500 text-white font-medium py-2 px-4 rounded-lg transition text-xs shadow-md cursor-pointer">
+                📤 ส่งคะแนนเข้า Google Sheets
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // 🚨 นำลิงก์ Web App URL ยาวๆ ที่ก๊อปปี้มาจากข้อ 8 ด้านบนมาวางแทนข้อความในเครื่องหมายคำพูดนี้ครับ
+        const GAS_WEB_APP_URL = "https://script.googleusercontent.com/macros/echo?user_content_key=AUkAhnTZ65arLcTaFO2wuhJI-N7e_eBtJcIMMIstUvfetZeUmIQ3ji8qr7DaJXWU-aSdzN3bdm1nZpcpIIY6Jcmfik6Wm_216l3wh7cv0MLDh8uRg93E70aF0kKsrxbkXA-DOsvIWJ0FKxI3J9VqBuMRd0lLI1cnO4VpnveLy1nl16wel9n38Qf_M9TSjOTpVRDzD7GyEgJKIA7a99ORsICW6IXFKHMRVB7tzFG2i5mE7ZDQ1_91lImofSgS6Q7c8Dz_Y0LtwC2swnhp4k27SzwgGmyFCB3Mpg&lib=MHUWWaTVISMkhxh13cAvf-0buytW488xe";
+
+        window.addEventListener('load', () => { initGame(); });
+
+        function initGame() {
+            const videoElement = document.getElementById('webcam');
+            const statusDiv = document.getElementById('game-status');
+            const scoreDiv = document.getElementById('score');
+            const btnSend = document.getElementById('btn-send');
+            
+            let touchCount = 0;
+            let audioCtx = null;
+            let isTouching = false;
+
+            const scene = new THREE.Scene();
+            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.getElementById('canvas3d').appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
+            scene.add(ambientLight);
+
+            const wireGeometry = new THREE.CylinderGeometry(0.15, 0.15, 5, 16);
+            const wireMaterial = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.9, roughness: 0.1 });
+            const wire = new THREE.Mesh(wireGeometry, wireMaterial);
+            wire.rotation.z = Math.PI / 2;
+            wire.position.set(0, 0, -5);
+            scene.add(wire);
+
+            const ringGeometry = new THREE.TorusGeometry(0.45, 0.06, 12, 48);
+            const ringMaterial = new THREE.MeshBasicMaterial({ color: 0x10b981 });
+            const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+            ring.position.set(0, 0, -5);
+            scene.add(ring);
+
+            function playBuzzer() {
+                try {
+                    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    if (audioCtx.state === 'suspended') audioCtx.resume();
+                    let osc = audioCtx.createOscillator();
+                    let gain = audioCtx.createGain();
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(180, audioCtx.currentTime); 
+                    gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1); 
+                    osc.start();
+                    osc.stop(audioCtx.currentTime + 0.1);
+                } catch(e) { console.log(e); }
+            }
+
+            function checkCollision() {
+                let distanceX = Math.abs(ring.position.x - wire.position.x);
+                let distanceY = Math.abs(ring.position.y - wire.position.y);
+                if (distanceX < 2.5 && distanceY < 0.32) {
+                    if (!isTouching) {
+                        isTouching = true;
+                        touchCount++;
+                        scoreDiv.innerText = `ชนสิ่งกีดขวาง: ${touchCount} ครั้ง`;
+                        statusDiv.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-rose-500 animate-ping"></span><span class="text-rose-400 font-bold">🚨 ไฟช็อต! (วงจรปิด)</span>`;
+                        ringMaterial.color.setHex(0xf43f5e); 
+                        playBuzzer();
+                    }
+                } else {
+                    if (isTouching) {
+                        isTouching = false;
+                        statusDiv.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span><span>สถานะ: วงจรเปิด (ปกติ)</span>`;
+                        ringMaterial.color.setHex(0x10b981); 
+                    }
+                }
+            }
+
+            btnSend.addEventListener('click', () => {
+                btnSend.innerText = "⏳ กำลังส่งข้อมูล...";
+                btnSend.disabled = true;
+
+                fetch(GAS_WEB_APP_URL, {
+                    method: "POST",
+                    mode: "no-cors", 
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ score: touchCount, status: "ส่งจากเว็บไซต์อิสระ" })
+                })
+                .then(() => {
+                    btnSend.innerText = "📤 ส่งคะแนนสำเร็จ!";
+                    setTimeout(() => {
+                        btnSend.innerText = "📤 ส่งคะแนนเข้า Google Sheets";
+                        btnSend.disabled = false;
+                    }, 2000);
+                })
+                .catch(err => {
+                    alert("ล้มเหลว");
+                    btnSend.disabled = false;
+                });
+            });
+
+            function onResults(results) {
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    const hand = results.multiHandLandmarks[0];
+                    const indexTip = hand[8];
+                    let targetX = -(indexTip.x - 0.5) * 8.5; 
+                    let targetY = -(indexTip.y - 0.5) * 6.5;
+                    ring.position.x += (targetX - ring.position.x) * 0.4;
+                    ring.position.y += (targetY - ring.position.y) * 0.4;
+                    checkCollision();
+                }
+                renderer.render(scene, camera);
+            }
+
+            const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+            hands.onResults(onResults);
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => { await hands.send({ image: videoElement }); },
+                width: 640, height: 480
+            });
+            cameraUtils.start();
+        }
+    </script>
+</body>
+</html>
