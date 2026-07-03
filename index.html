@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <title>⚡ AR Wire Maze Pro - Red Obstacle Edition</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        #webcam { transform: scaleX(-1); will-change: transform; }
+    </style>
+</head>
+<body class="bg-black m-0 p-0 overflow-hidden select-none touch-none">
+
+    <video id="webcam" class="absolute w-full h-full object-cover z-10" autoplay playsinline muted></video>
+    <div id="canvas3d" class="absolute w-full h-full z-20 pointer-events-none"></div>
+
+    <div class="absolute top-4 left-4 z-30 bg-slate-900/90 backdrop-blur-md text-white p-5 rounded-xl border border-slate-700/50 shadow-2xl max-w-sm">
+        <h1 class="text-xl font-bold tracking-wide mb-1 text-red-500">⚡ AR Wire Maze (ด่านลวดแดง)</h1>
+        <p class="text-xs text-slate-400 mb-3">ลากห่วงจากจุดเริ่ม (ซ้าย) ไปยังปลายทาง (ขวา)</p>
+        <div class="space-y-2 text-sm border-t border-slate-700 pt-3">
+            <div id="game-status" class="flex items-center gap-2">
+                <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>สถานะ: วงจรเปิด (ปกติ)</span>
+            </div>
+            <div id="score" class="text-slate-300 font-mono text-base">ชนสิ่งกีดขวาง: 0 ครั้ง</div>
+            <button id="btn-send" class="w-full mt-2 bg-red-600 hover:bg-red-500 text-white font-medium py-2 px-4 rounded-lg transition text-xs shadow-md cursor-pointer">
+                📤 ส่งคะแนนเข้า Google Sheets
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // 🚨 นำลิงก์ Web App URL ยาวๆ ที่ก๊อปปี้มาจาก Google Apps Script มาวางตรงนี้ครับ
+        const GAS_WEB_APP_URL = "https://script.googleusercontent.com/macros/echo?user_content_key=AUkAhnTZ65arLcTaFO2wuhJI-N7e_eBtJcIMMIstUvfetZeUmIQ3ji8qr7DaJXWU-aSdzN3bdm1nZpcpIIY6Jcmfik6Wm_216l3wh7cv0MLDh8uRg93E70aF0kKsrxbkXA-DOsvIWJ0FKxI3J9VqBuMRd0lLI1cnO4VpnveLy1nl16wel9n38Qf_M9TSjOTpVRDzD7GyEgJKIA7a99ORsICW6IXFKHMRVB7tzFG2i5mE7ZDQ1_91lImofSgS6Q7c8Dz_Y0LtwC2swnhp4k27SzwgGmyFCB3Mpg&lib=MHUWWaTVISMkhxh13cAvf-0buytW488xe";
+
+        window.addEventListener('load', () => { initGame(); });
+
+        function initGame() {
+            const videoElement = document.getElementById('webcam');
+            const statusDiv = document.getElementById('game-status');
+            const scoreDiv = document.getElementById('score');
+            const btnSend = document.getElementById('btn-send');
+            
+            let touchCount = 0;
+            let audioCtx = null;
+            let isTouching = false;
+
+            // --- 1. Setup ฉาก 3D (Three.js) ---
+            const scene = new THREE.Scene();
+            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.getElementById('canvas3d').appendChild(renderer.domElement);
+
+            // เพิ่มแสงเพื่อให้โมเดล 3D มีมิติสวยงาม
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(0, 5, 5);
+            scene.add(dirLight);
+
+            // --- 2. สร้างเส้นลวดสิ่งกีดขวางสีแดงแบบซิกแซก (เต็มหน้าจอ) ---
+            // กำหนดพิกัดจุดหักเหของเส้นลวด (เริ่มจากซ้ายสุด X=-3.5 ไปขวาสุด X=3.5)
+            const points = [
+                new THREE.Vector3(-3.5, 1.5, -5),  // จุดเริ่มต้น (ซ้ายบน)
+                new THREE.Vector3(-2.0, -1.5, -5), // หักลงล่าง
+                new THREE.Vector3(-0.5, 1.5, -5),  // หักขึ้นบน
+                new THREE.Vector3(1.0, -1.5, -5),  // หักลงล่าง
+                new THREE.Vector3(2.5, 1.5, -5),   // หักขึ้นบน
+                new THREE.Vector3(3.5, 0.0, -5)    // ปลายทาง (ขวาตรงกลาง)
+            ];
+
+            // แปลงพิกัดจุดให้กลายเป็นเส้นท่อ 3D คดเคี้ยว
+            const curve = new THREE.CatmullRomCurve3(points);
+            // พารามิเตอร์: เส้นทาง, ความละเอียด(64), รัศมีท่อ(0.12), ความกลมของท่อ(8)
+            const wireGeometry = new THREE.TubeGeometry(curve, 64, 0.12, 8, false);
+            // ตั้งค่าวัสดุให้เป็นสีแดงเรืองแสงนีออน (Emissive Red)
+            const wireMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0xff0000, 
+                emissive: 0x550000,
+                metalness: 0.2, 
+                roughness: 0.3 
+            });
+            const wire = new THREE.Mesh(wireGeometry, wireMaterial);
+            scene.add(wire);
+
+            // วาดป้ายข้อความเสมือน "START" และ "FINISH" ลอยบนอากาศ
+            createMarker("- START -", -3.5, 2.0, 0x22c55e);
+            createMarker("- FINISH -", 3.5, 0.6, 0x3b82f6);
+
+            function createMarker(text, x, y, color) {
+                const canvas = document.createElement('canvas');
+                canvas.width = 256; canvas.height = 64;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#' + color.toString(16);
+                ctx.font = 'Bold 32px Arial';
+                ctx.fillText(text, 10, 40);
+                const texture = new THREE.CanvasTexture(canvas);
+                const mat = new THREE.MeshBasicMaterial({ map: texture, transparent: true });
+                const geom = new THREE.PlaneGeometry(1.5, 0.375);
+                const mesh = new THREE.Mesh(geom, mat);
+                mesh.position.set(x, y, -5);
+                scene.add(mesh);
+            }
+
+            // สร้างห่วง (Torus) วิ่งตามนิ้ว
+            const ringGeometry = new THREE.TorusGeometry(0.38, 0.05, 12, 48);
+            const ringMaterial = new THREE.MeshBasicMaterial({ color: 0x00ffcc }); // สีฟ้าพาสเทลตัดกับลวดสีแดง
+            const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+            ring.position.set(-3.5, 1.5, -5); // เริ่มต้นที่จุดสตาร์ต
+            scene.add(ring);
+
+            // --- 3. ระบบเสียงบัสเซอร์เตือนภัย ---
+            function playBuzzer() {
+                try {
+                    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    if (audioCtx.state === 'suspended') audioCtx.resume();
+                    let osc = audioCtx.createOscillator();
+                    let gain = audioCtx.createGain();
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(220, audioCtx.currentTime); 
+                    gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15); 
+                    osc.start();
+                    osc.stop(audioCtx.currentTime + 0.15);
+                } catch(e) { console.log(e); }
+            }
+
+            // --- 4. ฟังก์ชันตรวจสอบการชนเส้นลวดคดเคี้ยวแบบละเอียด ---
+            function checkCollision() {
+                let hit = false;
+                // สุ่มตรวจหาพิกัดบนเส้นโค้งซิกแซก 100 จุด เพื่อเปรียบเทียบระยะห่างกับตำแหน่งของห่วง
+                for (let i = 0; i <= 100; i++) {
+                    let t = i / 100;
+                    let wirePoint = curve.getPointAt(t);
+                    let distance = ring.position.distanceTo(wirePoint);
+                    
+                    // ถ้าระยะห่างระหว่างนิ้วกับจุดใดๆ บนลวด น้อยกว่าระยะปลอดภัย ถือว่า "ชน"
+                    if (distance < 0.42) { 
+                        hit = true;
+                        break;
+                    }
+                }
+
+                if (hit) {
+                    if (!isTouching) {
+                        isTouching = true;
+                        touchCount++;
+                        scoreDiv.innerText = `ชนสิ่งกีดขวาง: ${touchCount} ครั้ง`;
+                        statusDiv.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-red-500 animate-ping"></span><span class="text-red-400 font-bold">🚨 ไฟช็อต! (วงจรปิด)</span>`;
+                        ringMaterial.color.setHex(0xff0000); // ชนแล้วห่วงเปลี่ยนเป็นสีแดงเข้ม
+                        playBuzzer();
+                        if (navigator.vibrate) navigator.vibrate(60);
+                    }
+                } else {
+                    if (isTouching) {
+                        isTouching = false;
+                        statusDiv.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span><span>สถานะ: วงจรเปิด (ปกติ)</span>`;
+                        ringMaterial.color.setHex(0x00ffcc); // ปลอดภัยกลับเป็นสีฟ้าสว่าง
+                    }
+                }
+            }
+
+            // --- 5. การส่งข้อมูลเข้า Google Sheets ---
+            btnSend.addEventListener('click', () => {
+                btnSend.innerText = "⏳ กำลังบันทึก...";
+                btnSend.disabled = true;
+
+                fetch(GAS_WEB_APP_URL, {
+                    method: "POST",
+                    mode: "no-cors", 
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ score: touchCount, status: "เล่นผ่านด่านลวดแดงซิกแซก" })
+                })
+                .then(() => {
+                    btnSend.innerText = "📤 บันทึกคะแนนสำเร็จ!";
+                    setTimeout(() => {
+                        btnSend.innerText = "📤 ส่งคะแนนเข้า Google Sheets";
+                        btnSend.disabled = false;
+                    }, 2500);
+                })
+                .catch(err => {
+                    alert("ล้มเหลว");
+                    btnSend.disabled = false;
+                });
+            });
+
+            // --- 6. ประมวลผลพิกัดมือเคลื่อนที่ตามกล้อง ---
+            function onResults(results) {
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    const hand = results.multiHandLandmarks[0];
+                    const indexTip = hand[8];
+                    
+                    let targetX = -(indexTip.x - 0.5) * 9.0; // ขยายความกว้างเต็มหน้าจอ
+                    let targetY = -(indexTip.y - 0.5) * 6.5;
+                    
+                    ring.position.x += (targetX - ring.position.x) * 0.35;
+                    ring.position.y += (targetY - ring.position.y) * 0.35;
+
+                    checkCollision();
+                }
+                renderer.render(scene, camera);
+            }
+
+            const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.55, minTrackingConfidence: 0.55 });
+            hands.onResults(onResults);
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => { await hands.send({ image: videoElement }); },
+                width: 640, height: 480
+            });
+            cameraUtils.start();
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+    </script>
+</body>
+</html>
